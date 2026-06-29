@@ -14,20 +14,23 @@ set -euo pipefail
 #   sudo apt install ffmpeg
 #
 # Defaults can be overridden:
-#   SILENCE_DB="-35dB" SILENCE_DURATION="0.45" SILENCE_SPEED="5" ./auto-speedup-silence.sh input.mkv
+#   SILENCE_DB="-35dB" SILENCE_DURATION="2" SILENCE_SPEED="5" ./auto-speedup-silence.sh input.mkv
 #
 # Notes:
 #   SILENCE_SPEED=5 means silent parts are played at 5x speed,
 #   i.e. compressed to 20% of their original duration.
 
 SILENCE_DB="${SILENCE_DB:--35dB}"
-SILENCE_DURATION="${SILENCE_DURATION:-0.45}"
+SILENCE_DURATION="${SILENCE_DURATION:-2}"
 SILENCE_SPEED="${SILENCE_SPEED:-5}"
 
 # Output resolution.
 # For YouTube-style 16:9, 1920x1080 is a safe default.
 OUT_W="${OUT_W:-1920}"
 OUT_H="${OUT_H:-1080}"
+
+# Output frame rate (constant). Set to "source" to preserve source framerate (may produce VFR).
+OUTPUT_FPS="${OUTPUT_FPS:-60}"
 
 # H.264/AAC settings.
 CRF="${CRF:-20}"
@@ -76,6 +79,9 @@ process_file() {
   echo "Output:     $output"
   echo "Silence:    ${SILENCE_DB}, minimum ${SILENCE_DURATION}s"
   echo "Speedup:    ${SILENCE_SPEED}x during silence"
+  local fps_label="${OUTPUT_FPS}fps"
+  if [[ "$OUTPUT_FPS" == "source" ]]; then fps_label="source (may be VFR)"; fi
+  echo "Frame rate: ${fps_label}"
   echo
 
   local duration
@@ -180,9 +186,15 @@ process_file() {
 
   printf "%s" "$filter" > "$filter_file"
 
-  ffmpeg -hide_banner -y \
+  local fps_opts=()
+if [[ "$OUTPUT_FPS" != "source" ]]; then
+  fps_opts=(-r "$OUTPUT_FPS" -vsync cfr)
+fi
+
+ffmpeg -hide_banner -y \
     -i "$input" \
     -filter_complex_script "$filter_file" \
+    "${fps_opts[@]}" \
     -map "[vout]" \
     -map "[aout]" \
     -c:v libx264 \
