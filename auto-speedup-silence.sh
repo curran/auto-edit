@@ -240,7 +240,12 @@ process_file() {
 
   local fps_opts=()
   if [[ "$OUTPUT_FPS" != "source" ]]; then
-    fps_opts=(-r "$OUTPUT_FPS" -fps_mode cfr)
+    # ffmpeg >= 5 uses -fps_mode; older versions use -vsync.
+    if ffmpeg -hide_banner -h full 2>/dev/null | grep -q -- '-fps_mode'; then
+      fps_opts=(-r "$OUTPUT_FPS" -fps_mode cfr)
+    else
+      fps_opts=(-r "$OUTPUT_FPS" -vsync cfr)
+    fi
   fi
 
   local chunk_index=0
