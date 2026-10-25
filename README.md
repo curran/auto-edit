@@ -19,7 +19,9 @@ Output is `<input>.edited.mp4`.
 
 1. Uses `ffmpeg`’s `silencedetect` filter to find silent ranges.
 2. Splits the video into speaking (normal speed) and silent (5× speed) segments.
-3. Reassembles everything with `concat`, crops to 16:9, and encodes as H.264 + AAC.
+3. Keeps a small buffer of normal-speed "sacred silence" at each end of every
+   silence, so speech onsets/tails are not clipped.
+4. Reassembles everything with `concat`, crops to 16:9, and encodes as H.264 + AAC.
 
 ### Requirements
 
@@ -34,6 +36,7 @@ sudo apt install ffmpeg
 | `SILENCE_DB` | `-35dB` | Noise threshold for silence detection |
 | `SILENCE_DURATION` | `2` | Minimum silence duration in seconds |
 | `SILENCE_SPEED` | `5` | Speed multiplier during silence |
+| `SACRED_SILENCE` | `0.3` | Seconds of normal-speed silence kept at each end of a detected silence (protects speech edges) |
 | `OUT_W` | `1920` | Output width |
 | `OUT_H` | `1080` | Output height |
 | `CRF` | `20` | H.264 quality (lower = better) |
@@ -52,6 +55,9 @@ SILENCE_DB="-45dB" SILENCE_DURATION="2" ./auto-speedup-silence.sh input.mkv
 
 # Faster silence speedup (10x)
 SILENCE_SPEED="10" ./auto-speedup-silence.sh input.mkv
+
+# Longer speech-edge buffer (0.6s of sacred silence)
+SACRED_SILENCE="0.6" ./auto-speedup-silence.sh input.mkv
 
 # 30 FPS output instead of 60
 OUTPUT_FPS="30" ./auto-speedup-silence.sh input.mkv

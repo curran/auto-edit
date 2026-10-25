@@ -14,11 +14,16 @@ set -euo pipefail
 #   sudo apt install ffmpeg
 #
 # Defaults can be overridden:
-#   SILENCE_DB="-35dB" SILENCE_DURATION="2" SILENCE_SPEED="5" ./auto-speedup-silence.sh input.mkv
+#   SILENCE_DB="-35dB" SILENCE_DURATION="2" SILENCE_SPEED="5" \
+#     SACRED_SILENCE="0.3" ./auto-speedup-silence.sh input.mkv
 #
 # Notes:
 #   SILENCE_SPEED=5 means silent parts are played at 5x speed,
 #   i.e. compressed to 20% of their original duration.
+#
+#   SACRED_SILENCE is a small buffer of normal-speed silence kept at each
+#   end of every detected silence, so the onset/tail of speech is never
+#   clipped by slightly-off silence boundaries.
 #
 #   The work is done in chunks (CHUNK_SECONDS) so that the ffmpeg filter
 #   graph never has to hold hundreds of trim/atempo branches at once.
@@ -29,6 +34,10 @@ set -euo pipefail
 SILENCE_DB="${SILENCE_DB:--35dB}"
 SILENCE_DURATION="${SILENCE_DURATION:-2}"
 SILENCE_SPEED="${SILENCE_SPEED:-5}"
+
+# Seconds of normal-speed "sacred silence" kept at each end of every
+# detected silence range. Prevents speech onsets/tails from being clipped.
+SACRED_SILENCE="${SACRED_SILENCE:-0.3}"
 
 # Output resolution.
 # For YouTube-style 16:9, 1920x1080 is a safe default.
@@ -72,6 +81,10 @@ float_gt() {
 
 float_sub() {
   awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", a - b }'
+}
+
+float_add() {
+  awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", a + b }'
 }
 
 # Build the filtergraph for one chunk.
@@ -163,6 +176,7 @@ process_file() {
   echo "Output:     $output"
   echo "Silence:    ${SILENCE_DB}, minimum ${SILENCE_DURATION}s"
   echo "Speedup:    ${SILENCE_SPEED}x during silence"
+  echo "Buffer:     ${SACRED_SILENCE}s normal-speed at each speech edge"
   local fps_label="${OUTPUT_FPS}fps"
   if [[ "$OUTPUT_FPS" == "source" ]]; then fps_label="source (may be VFR)"; fi
   echo "Frame rate: ${fps_label}"
@@ -218,6 +232,25 @@ process_file() {
       }
     }
   ' "$silence_log" > "$ranges_file"
+
+  # Keep a small buffer of normal-speed "sacred silence" at each end of every
+  # detected silence. This stops silencedetect's slightly-off boundaries from
+  # clipping the very start or tail of speech. Ranges shorter than twice the
+  # buffer are dropped so they stay entirely at normal speed.
+  if float_gt "$SACRED_SILENCE" "0"; then
+    local buffered_ranges="$tmpdir/ranges.buffered.tsv"
+    : > "$buffered_ranges"
+    while IFS=$'\t' read -r s e; do
+      [[ -z "${s:-}" || -z "${e:-}" ]] && continue
+      local ns ne
+      ns="$(float_add "$s" "$SACRED_SILENCE")"
+      ne="$(float_sub "$e" "$SACRED_SILENCE")"
+      if float_gt "$ne" "$ns"; then
+        printf '%s\t%s\n' "$ns" "$ne" >> "$buffered_ranges"
+      fi
+    done < "$ranges_file"
+    ranges_file="$buffered_ranges"
+  fi
 
   # Compute fixed chunk boundaries. Splitting a silence range across a
   # chunk boundary is fine: each half is sped up independently and the
@@ -312,6 +345,40 @@ process_file() {
     -c copy \
     -movflags +faststart \
     "$output"
+
+  # The concat demuxer offsets each segment by the container duration, and MP4
+  # rounds that to milliseconds. This can introduce tiny timestamp gaps and make
+  # avg_frame_rate differ from r_frame_rate -- which NLEs such as Kdenlive treat
+  # as a variable frame rate and refuse to edit. When that happens, re-encode to
+  # a strict constant frame rate so the result is edit-friendly.
+  if [[ "$OUTPUT_FPS" != "source" ]]; then
+    local r_fps avg_fps
+    r_fps="$(ffprobe -v error -select_streams v:0 \
+      -show_entries stream=r_frame_rate \
+      -of default=noprint_wrappers=1:nokey=1 "$output")"
+    avg_fps="$(ffprobe -v error -select_streams v:0 \
+      -show_entries stream=avg_frame_rate \
+      -of default=noprint_wrappers=1:nokey=1 "$output")"
+
+    if [[ -n "$r_fps" && -n "$avg_fps" && "$r_fps" != "$avg_fps" ]]; then
+      echo
+      echo "Normalizing to constant frame rate for NLE compatibility..."
+      local norm_out="${output%.mp4}.normalized.mp4"
+      ffmpeg -hide_banner -nostdin -nostats -y \
+        -i "$output" \
+        "${fps_opts[@]}" \
+        -c:v libx264 \
+        -preset "$PRESET" \
+        -crf "$CRF" \
+        -profile:v high \
+        -pix_fmt yuv420p \
+        -c:a aac \
+        -b:a "$AUDIO_BITRATE" \
+        -movflags +faststart \
+        "$norm_out"
+      mv "$norm_out" "$output"
+    fi
+  fi
 
   rm -rf "$tmpdir"
 
